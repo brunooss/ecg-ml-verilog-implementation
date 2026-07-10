@@ -10,6 +10,11 @@ O objetivo é rodar **o modelo em hardware** (o *forward pass* com pesos e bias 
 treinados e congelados), de forma o mais **independente de fornecedor** possível,
 para reaproveitar a metodologia em outras placas.
 
+> 🟢 **Novo por aqui / sem background técnico?** Comece por
+> [`docs/06-explicacao-para-leigos.md`](docs/06-explicacao-para-leigos.md) — explica
+> o projeto inteiro (modelo, camadas, ferramentas e o que já foi feito) em
+> linguagem simples.
+
 ---
 
 ## 1. Conclusões
@@ -64,14 +69,15 @@ Executado com TensorFlow + NNgen (resultados completos em
 - ✅ Contagem de parâmetros confirmada (6.425.638, bate com a análise).
 - ✅ Fusão de BatchNorm: 13 pares Conv1D→BN fundidos.
 - ✅ Exportação para ONNX (25,7 MB fp32).
-- ⚠️ **NNgen**: rodei o import ONNX de ponta a ponta. A topologia residual é
-  **aceita** (Conv, Add, MaxPool, BN, ReLU), mas o import via `tf2onnx` tem
-  fricção real: a Dense final sai como `MatMul`, os `Unsqueeze` vêm em opset 13, o
-  NNgen 1.3.4 quebra com NumPy ≥1.24 e, no fundo, o **Conv1D empacotado**
-  (`Unsqueeze→Conv2D→Squeeze`) não casa com o layout esperado. Corrigi os três
-  primeiros (embutidos no script/requirements); a solução de fundo é **exportar o
-  modelo como Conv2D (H×1)** ou usar a **API nativa do NNgen**. Diagnóstico
-  completo em [`docs/05`](docs/05-testes-realizados.md) §4.
+- ✅ **NNgen gera Verilog RTL de verdade.** Pela API nativa, gerei o RTL de uma
+  camada de convolução do modelo (64→128, kernel 16×1, int16): **61.572 linhas**,
+  **parse OK no Icarus Verilog**, com **interface AXI4 para a DDR3**. Excerto em
+  [`rtl/`](rtl/). É o bloco reutilizável do acelerador.
+- ⚠️ O import do modelo **inteiro** via ONNX (tf2onnx) tem fricção com o NNgen
+  1.3.4: reescrevi o modelo em **Conv2D (H×1)** e o problema de layout sumiu, mas
+  o `padding='SAME'` de convoluções com *stride* ainda diverge do Keras no `Add`
+  residual → por isso a **API nativa** é o caminho. Diagnóstico completo em
+  [`docs/05`](docs/05-testes-realizados.md) §4–6.
 - ✅ Engine C do Bambu compila limpo (`gcc -Wall -Wextra`) — via **sem** nenhuma
   dessas fricções de ONNX.
 
@@ -186,7 +192,10 @@ Plano por etapas com marcos verificáveis em
 │   ├── 03-recomendacao-e-pipeline.md
 │   ├── 04-arria-v-recursos.md   # recursos da Arria V + estimativa de DDR3
 │   ├── 05-testes-realizados.md  # o que já foi executado e validado
+│   ├── 06-explicacao-para-leigos.md  # o projeto inteiro em linguagem simples
 │   └── referencias.md
+├── rtl/
+│   └── ecg_conv_layer_interface.v    # excerto do Verilog gerado (NNgen)
 ├── scripts/
 │   ├── requirements.txt
 │   ├── 00_baseline.py           # build + golden reference
@@ -203,10 +212,11 @@ Plano por etapas com marcos verificáveis em
 ## 6. Próximos passos e pontos abertos
 
 **Próximos passos técnicos (executáveis em software, sem hardware):**
-1. **NNgen:** reescrever as convoluções do modelo como **Conv2D (H×1)** (ECG como
-   imagem 4096×1×12) e reexportar, para o NNgen consumir sem os *hacks* de
-   Conv1D e gerar o RTL do backbone. (Ou usar a API nativa do NNgen.) Ver
-   [`docs/05`](docs/05-testes-realizados.md) §4.
+1. **NNgen:** encadear as ~15 convoluções pela **API nativa** (já provada gerando
+   RTL de uma camada — ver [`docs/05`](docs/05-testes-realizados.md) §6 e
+   [`rtl/`](rtl/)), somar os *skips* e emitir o Verilog do backbone completo;
+   depois simular contra o *golden reference*. Trabalho mecânico, sem incógnitas
+   de viabilidade.
 2. **Acurácia:** baixar os pesos treinados (Zenodo) + o CODE-test e medir a
    **queda de AUC/F1 com int16** — a validação mais importante para a pesquisa.
 3. **Bambu:** empacotar `weights.npz` em int16 + tabela de camadas e sintetizar

@@ -89,7 +89,9 @@ def main():
         default_operator_dtype=dtype,
         default_scale_dtype=ng.int16,
         default_bias_dtype=ng.int32,
-        onnx_input_layout="channel_last",
+        # layout: manter os defaults do NNgen (ONNX vem NCHW do tf2onnx;
+        # NNgen trabalha internamente em NHWC). Passar strings invalidas aqui
+        # causava "ValueError: substring not found" em transpose_layout.
     )
 
     # 2) (quando houver pesos reais) calibrar quantizacao com amostras de ECG:

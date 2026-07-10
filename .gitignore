@@ -16,3 +16,5 @@ __pycache__/
 *.o
 scripts/bambu/*_tb*
 scripts/**/HLS_output/
+# versiona o excerto de interface em rtl/, mas nao o .v completo (2.8 MB) em outputs/
+!rtl/*.v

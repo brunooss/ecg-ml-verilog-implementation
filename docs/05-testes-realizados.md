@@ -97,8 +97,47 @@ espera uma **convolução 2D genuína** (NHWC/NCHW) e quebra com essa Conv1D
 **Conclusão do teste:** a topologia residual do modelo é aceita pelo NNgen, mas o
 **import via tf2onnx tem fricção real** com a serialização de Conv1D. O NNgen
 continua viável, porém pelo caminho de **modelo 2D (H×1)** ou **API nativa** — não
-pelo ONNX Conv1D direto. Isso reforça o Bambu como a via portável de menor atrito.
-Os fixes 2 e 3 já estão embutidos no script e no `requirements.txt`.
+pelo ONNX Conv1D direto. Os fixes 2 e 3 já estão embutidos no script/requirements.
+
+### Rodada 3 — modelo reescrito em Conv2D (H×1)
+Reescrevi o modelo com camadas **Conv2D `(k,1)`** (`scripts/model_2d.py`),
+matematicamente idêntico (mesmos **6.425.638** parâmetros, confirmado). Resultado
+ao importar no NNgen:
+- ✅ **O problema de layout sumiu** (0 `Unsqueeze` necessários — convolução 2D
+  nativa). Também corrigi um bug do meu script (passava `onnx_input_layout=
+  "channel_last"`, string inválida; o correto são os defaults `('N','C','H','W')`).
+- ⚠️ Novo ponto: o `padding='SAME'` de convoluções **com stride** no NNgen 1.3.4
+  não reproduz as formas do Keras, então o **`Add` residual** recebe tensores de
+  formas diferentes (`(1,1018,23,128)` vs `(1,1022,9,128)`) e falha. É uma lacuna
+  semântica do front-end ONNX do NNgen para convoluções strided 'same'.
+
+**Solução adotada:** usar a **API nativa do NNgen** (stride/padding explícitos),
+que contorna essa lacuna — ver o item ✅ 6 abaixo.
+
+## ✅ 6. Geração de RTL Verilog — FEITA (NNgen, API nativa)
+
+`scripts/03b_nngen_native_layer.py` gera, pela **API nativa do NNgen**, o Verilog
+de uma camada de convolução do modelo com **dimensões reais** (Conv 64→128,
+kernel 16×1, int16, padding SAME). Resultado **verificado**:
+
+```
+[ok] Verilog RTL gerado: outputs/nngen/ecg_conv_layer.v (61.572 linhas)
+     conv 64->128, kernel 16x1, H=4096, int16
+```
+- **Parse OK no Icarus Verilog** (`iverilog -t null -Wall` → exit 0) — é RTL
+  sintetizável, não pseudocódigo.
+- **Interface AXI4 mestre** (`maxi_awaddr`, `maxi_wdata[127:0]`, canais aw/w/b/
+  ar/r) — o barramento para trazer os pesos da **DDR3**, exatamente como o projeto
+  exige.
+- Excerto da interface versionado em [`../rtl/ecg_conv_layer_interface.v`](../rtl/ecg_conv_layer_interface.v);
+  o `.v` completo (2,8 MB) é gerado localmente pelo script.
+
+**Conclusão:** está **provado, executando**, que o NNgen emite Verilog
+sintetizável com AXI4/DDR3 para o operador-alvo do modelo (a convolução int16).
+Esse módulo é o **bloco reutilizável** do acelerador *layer-by-layer*. O que falta
+para o backbone completo é **encadear as ~15 convoluções pela API nativa** (cada
+uma com suas dimensões/stride) e somar os *skips* — trabalho mecânico, sem mais
+incógnitas de viabilidade.
 
 ## ✅ 5. Engine C para Bambu — COMPILA LIMPO
 
