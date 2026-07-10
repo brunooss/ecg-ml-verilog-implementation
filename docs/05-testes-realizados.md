@@ -46,36 +46,59 @@ têm BN). A matemática da fusão (`w' = w·γ/√(var+ε)`, `b' = β − mean·
 
 Os 25,7 MB de ONNX fp32 confirmam de novo a contagem de pesos.
 
-## ⚠️ 4. Importação no NNgen — BACKBONE OK, CAUDA PRECISA DE AJUSTE
+## ⚠️ 4. Importação no NNgen — DIAGNÓSTICO COMPLETO (executado de ponta a ponta)
 
-Este foi o teste mais importante, porque valida o risco que eu havia sinalizado
-(mapear **Conv1D → conv2d k×1** e o **`Add`** do skip no NNgen). Resultado real:
+Este foi o teste mais importante, porque valida o risco central: mapear
+**Conv1D → conv2d k×1** e o **`Add`** do skip no NNgen. Rodei o import de ponta a
+ponta, contornando cada erro em sequência para chegar à causa de fundo.
 
-- **O NNgen importa toda a espinha convolucional sem erro.** O importador
-  percorreu, sem falhar, todas as **Conv1D** (mapeadas para conv2d k×1), as
-  somas residuais **`Add`**, as **MaxPool**, **BatchNormalization**, **ReLU**,
-  **Transpose** e **Flatten/Reshape**. Confirmado inspecionando o `func_map` do
-  importador (ops suportadas: `Conv, Gemm, Add, MaxPool, Relu, Sigmoid, Flatten,
-  BatchNormalization, Mul, Reshape, Transpose`).
-- **O import só falha na Dense(6) final** — que é **0,002% dos MACs** do modelo.
-  Causa: o `tf2onnx` serializa a Dense como `Transpose + Reshape + MatMul` (com o
-  peso passando por um `Cast`), enquanto o front-end do NNgen espera um `Flatten`
-  limpo + `Gemm` com peso **constante**. Erros observados, em sequência:
-  `KeyError: 'MatMul'` → (após trocar por `Gemm`) `object of type 'variable' has
-  no len()` no importador de `Gemm`/`Reshape`.
+### O que passou
+- **Operadores suportados pelo importador ONNX do NNgen** (confirmado no código):
+  `Conv, Gemm, Add, MaxPool, Relu, Sigmoid, Flatten, BatchNormalization, Mul,
+  Reshape, Transpose`.
+- O importador **percorreu as convoluções, as somas residuais `Add`, as MaxPool,
+  BN e ReLU** — ou seja, a topologia residual em si é aceita.
 
-**Como resolver (documentado para a Etapa 2):**
-1. **Recomendado — separar a cauda:** deixar o NNgen acelerar o *backbone*
-   convolucional (que é ~100% da computação) e rodar a **Dense(6) final no host**.
-   É trivial (5120×6 = 30 k MACs) e elimina toda a fricção de serialização.
-2. **Alternativa — higiene de grafo:** re-exportar o modelo garantindo um
-   `Flatten` op nativo + `Gemm` com peso como *initializer* constante (sem
-   `Cast`/`Transpose`/`Reshape`), ou substituir a Dense por uma **Conv1D 1×1**
-   (que o NNgen mapeia como `Conv`).
+### Os três problemas encontrados (na ordem em que apareceram)
+1. **Dense(6) final como `MatMul`** (não `Gemm`). O `tf2onnx` serializa a Dense
+   como `Transpose+Reshape+MatMul` com o peso via `Cast`; o NNgen não tem handler
+   de `MatMul`. → **Contornável** cortando o grafo antes do Flatten (a Dense é
+   0,002% dos MACs e roda no host) — foi o que fiz para prosseguir.
+2. **`Unsqueeze`/`Squeeze` do opset 13** com *axes* como **input**; o importador
+   do NNgen só lê *axes* como **atributo** (`UnboundLocalError: axes`). →
+   **Corrigido** por um passo que move *axes* para atributo
+   (`fix_unsqueeze_axes` em `scripts/03a_nngen_convert.py`). O conversor oficial
+   `onnx.version_converter` **não** resolve (falta adapter de `Transpose` 13→11).
+3. **`np.float`/`np.int`** — o NNgen 1.3.4 usa aliases removidos no NumPy ≥1.24
+   (`AttributeError: module 'numpy' has no attribute 'float'`). → **Corrigido**
+   fixando **`numpy<1.24`** (ver `scripts/requirements.txt`).
 
-**Conclusão do teste:** a viabilidade do NNgen para este modelo está
-**praticamente confirmada** — o difícil (todo o backbone Conv1D + skips) passou;
-o que resta é higiene da camada final, com dois caminhos claros de solução.
+### A causa de fundo (o blocker real)
+Depois de resolver 1–3, o import falha em `conv.py` no ajuste de **layout**:
+```
+ValueError: substring not found   (nngen/onnx/util.transpose_layout)
+```
+Motivo: o `tf2onnx` representa **Conv1D** como `Unsqueeze → Conv2D → Squeeze`
+(inserindo uma dimensão espacial sintética). O *bookkeeping* de layout do NNgen
+espera uma **convolução 2D genuína** (NHWC/NCHW) e quebra com essa Conv1D
+"empacotada".
+
+**Correção robusta (para a Etapa 2):**
+1. **Expressar o modelo como Conv2D (H×1) antes de exportar** — tratar o ECG como
+   imagem `4096×1×12`, com kernels `(k,1)`. Assim o ONNX sai com `Conv` nativo 2D
+   e o NNgen importa sem os *hacks* de Unsqueeze/Squeeze. É a via recomendada se
+   quisermos o NNgen. (Requer reescrever as convoluções do `reference/model.py`
+   em 2D — mudança mecânica, sem alterar a matemática.)
+2. **Usar a API nativa do NNgen** (definir `ng.conv2d(...)` diretamente em Python
+   a partir dos pesos), sem passar por ONNX.
+3. **Ir de Bambu (via B):** o caminho C→Verilog **não tem nenhuma** dessas
+   fricções (é C puro, sem ONNX/opset/layout).
+
+**Conclusão do teste:** a topologia residual do modelo é aceita pelo NNgen, mas o
+**import via tf2onnx tem fricção real** com a serialização de Conv1D. O NNgen
+continua viável, porém pelo caminho de **modelo 2D (H×1)** ou **API nativa** — não
+pelo ONNX Conv1D direto. Isso reforça o Bambu como a via portável de menor atrito.
+Os fixes 2 e 3 já estão embutidos no script e no `requirements.txt`.
 
 ## ✅ 5. Engine C para Bambu — COMPILA LIMPO
 
@@ -94,7 +117,7 @@ depende do PandA/Bambu instalado e da parte exata da Arria V (Etapa 2/3).
 | Item | Por que não aqui | Onde fazer |
 |------|------------------|------------|
 | Acurácia com pesos reais + int16 | precisa baixar pesos do Zenodo e dataset de teste | Etapa 1, ambiente do projeto |
-| Geração de RTL completa no NNgen | depende de resolver a cauda (item 4) | Etapa 2 |
+| Geração de RTL no NNgen | precisa do modelo em Conv2D (H×1) ou API nativa (item 4) | Etapa 2 |
 | Síntese Bambu → Verilog | PandA/Bambu não instalado no contêiner | Etapa 2 |
 | *Place & route* / timing no Quartus | precisa do Quartus Prime + parte exata da Arria V | Etapa 3 |
 | Execução na placa | precisa do hardware Arria V + DDR3 | Etapa 3 |

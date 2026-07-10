@@ -1,15 +1,19 @@
 # Ambiente de software para as Etapas 0-2 (frente de conversao).
 # Testado com Python 3.11.
 #
-# NOTA: pyverilog (dependencia do NNgen) exige setuptools<58 para compilar em
+# NOTA 1: pyverilog (dependencia do NNgen) exige setuptools<58 para compilar em
 # Python 3.11. Recomenda-se um venv:
 #   python3 -m venv env && . env/bin/activate
 #   pip install "setuptools<58" wheel
 #   pip install -r scripts/requirements.txt
 #
+# NOTA 2: NNgen 1.3.4 usa np.float/np.int (removidos no numpy >= 1.24). Por isso
+# o numpy esta fixado abaixo em <1.24. (Descoberto executando - ver docs/05.)
+#
 # E, para simular o RTL gerado (NNgen/Bambu), instalar o Icarus Verilog no SO:
 #   apt-get install iverilog
 
+numpy<1.24            # NNgen 1.3.4 usa np.float/np.int (removidos em >=1.24)
 tensorflow-cpu        # construir o modelo e carregar pesos (.hdf5 do Zenodo)
 tf2onnx               # exportar Keras -> ONNX (entrada do NNgen)
 onnx

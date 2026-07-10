@@ -64,10 +64,16 @@ Executado com TensorFlow + NNgen (resultados completos em
 - ✅ Contagem de parâmetros confirmada (6.425.638, bate com a análise).
 - ✅ Fusão de BatchNorm: 13 pares Conv1D→BN fundidos.
 - ✅ Exportação para ONNX (25,7 MB fp32).
-- ✅ **NNgen importa todo o backbone convolucional** (Conv1D→conv2d, Add/skip,
-  MaxPool, BN, ReLU) — o maior risco técnico. Só a Dense(6) final (0,002% dos
-  MACs) precisa de higiene de grafo ou de rodar no host. **Fix documentado.**
-- ✅ Engine C do Bambu compila limpo (`gcc -Wall -Wextra`).
+- ⚠️ **NNgen**: rodei o import ONNX de ponta a ponta. A topologia residual é
+  **aceita** (Conv, Add, MaxPool, BN, ReLU), mas o import via `tf2onnx` tem
+  fricção real: a Dense final sai como `MatMul`, os `Unsqueeze` vêm em opset 13, o
+  NNgen 1.3.4 quebra com NumPy ≥1.24 e, no fundo, o **Conv1D empacotado**
+  (`Unsqueeze→Conv2D→Squeeze`) não casa com o layout esperado. Corrigi os três
+  primeiros (embutidos no script/requirements); a solução de fundo é **exportar o
+  modelo como Conv2D (H×1)** ou usar a **API nativa do NNgen**. Diagnóstico
+  completo em [`docs/05`](docs/05-testes-realizados.md) §4.
+- ✅ Engine C do Bambu compila limpo (`gcc -Wall -Wextra`) — via **sem** nenhuma
+  dessas fricções de ONNX.
 
 ---
 
@@ -112,10 +118,13 @@ python3 scripts/03a_nngen_convert.py --onnx outputs/ecg_model.onnx --bitwidth 16
 Gera o Verilog do acelerador (PEs + memória on-chip + DMA + AXI4), que sintetiza
 no Quartus para a Arria V. **Sem** HLS de fornecedor.
 
-**Ajuste conhecido (já diagnosticado):** a Dense(6) final precisa entrar como
-`Flatten`+`Gemm` com peso constante — ou, mais simples, rodar essa camada
-minúscula no host e deixar o NNgen acelerar todo o backbone convolucional. Ver
-[`docs/05-testes-realizados.md`](docs/05-testes-realizados.md) §4.
+**Ajustes conhecidos (diagnosticados executando):** o script já embute os fixes
+de opset (`Unsqueeze` axes→atributo) e o `requirements.txt` fixa `numpy<1.24`. A
+solução de fundo para o NNgen consumir as convoluções é **exportar o modelo como
+Conv2D (H×1)** (ECG como imagem 4096×1×12) ou usar a **API nativa do NNgen** — o
+ONNX Conv1D do tf2onnx não casa com o layout esperado. Diagnóstico completo em
+[`docs/05-testes-realizados.md`](docs/05-testes-realizados.md) §4. Sem isso, a via
+**Bambu** (§3.2) é a de menor atrito.
 
 ### 3.2 Via B — PandA/Bambu (C → Verilog)
 ```bash
@@ -191,9 +200,19 @@ Plano por etapas com marcos verificáveis em
     └── model.py                 # copia do model.py original (Ribeiro et al.)
 ```
 
-## 6. Pontos ainda abertos (não bloqueantes)
-- **Parte/kit exato da Arria V** e quanto de DDR3 o board tem — para fechar
-  *place & route* e timing.
-- **Interface de I/O** do ECG (host/AXI/UART/memória) — define o *wrapper* de topo.
+## 6. Próximos passos e pontos abertos
 
-Nenhum dos dois impede avançar nas Etapas 0–2 (software + protótipos em simulação).
+**Próximos passos técnicos (executáveis em software, sem hardware):**
+1. **NNgen:** reescrever as convoluções do modelo como **Conv2D (H×1)** (ECG como
+   imagem 4096×1×12) e reexportar, para o NNgen consumir sem os *hacks* de
+   Conv1D e gerar o RTL do backbone. (Ou usar a API nativa do NNgen.) Ver
+   [`docs/05`](docs/05-testes-realizados.md) §4.
+2. **Acurácia:** baixar os pesos treinados (Zenodo) + o CODE-test e medir a
+   **queda de AUC/F1 com int16** — a validação mais importante para a pesquisa.
+3. **Bambu:** empacotar `weights.npz` em int16 + tabela de camadas e sintetizar
+   o `conv1d_engine.c` (precisa do PandA/Bambu instalado).
+
+**Pontos abertos (dependem de você, não bloqueiam o software):**
+- **Parte/kit exato da Arria V** e quanto de DDR3 o board tem — para *place &
+  route* e timing.
+- **Interface de I/O** do ECG (host/AXI/UART/memória) — define o *wrapper* de topo.
