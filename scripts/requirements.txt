@@ -1,0 +1,25 @@
+# Ambiente de software para as Etapas 0-2 (frente de conversao).
+# Testado com Python 3.11.
+#
+# NOTA: pyverilog (dependencia do NNgen) exige setuptools<58 para compilar em
+# Python 3.11. Recomenda-se um venv:
+#   python3 -m venv env && . env/bin/activate
+#   pip install "setuptools<58" wheel
+#   pip install -r scripts/requirements.txt
+#
+# E, para simular o RTL gerado (NNgen/Bambu), instalar o Icarus Verilog no SO:
+#   apt-get install iverilog
+
+tensorflow-cpu        # construir o modelo e carregar pesos (.hdf5 do Zenodo)
+tf2onnx               # exportar Keras -> ONNX (entrada do NNgen)
+onnx
+onnxsim               # limpeza/fold do grafo ONNX
+onnxruntime           # checagem numerica do ONNX
+
+# Via A (NNgen): ONNX -> Verilog RTL + AXI/DMA
+nngen
+veriloggen
+pyverilog
+
+# Via B (Bambu): C -> Verilog. O compilador PandA/Bambu e instalado a parte
+# (nao via pip): https://panda.dei.polimi.it/  (pacotes .deb ou build do fonte)

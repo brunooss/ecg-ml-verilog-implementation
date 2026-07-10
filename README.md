@@ -1,88 +1,199 @@
 # Porte do modelo de diagnóstico automático de ECG para FPGA (Verilog)
 
-Pesquisa e engenharia para portar o modelo de diagnóstico automático de ECG
-de 12 derivações de [Ribeiro et al. (Nature Communications, 2020)](https://www.nature.com/articles/s41467-020-15432-4)
+Pesquisa e engenharia para portar o modelo de diagnóstico automático de ECG de
+12 derivações de [Ribeiro et al. (Nature Communications, 2020)](https://www.nature.com/articles/s41467-020-15432-4)
 — repositório [`antonior92/automatic-ecg-diagnosis`](https://github.com/antonior92/automatic-ecg-diagnosis),
-implementado em TensorFlow/Keras — para **Verilog RTL** executável em uma FPGA
-**Intel/Altera Arria V**.
+em TensorFlow/Keras — para **Verilog RTL** executável em uma FPGA **Intel/Altera
+Arria V**.
 
-O objetivo é rodar **o modelo em hardware** (o *forward pass* com os pesos e
-bias já treinados e congelados), de forma o mais **independente de fornecedor**
-possível, para que a mesma metodologia possa ser reaproveitada em outras placas.
+O objetivo é rodar **o modelo em hardware** (o *forward pass* com pesos e bias já
+treinados e congelados), de forma o mais **independente de fornecedor** possível,
+para reaproveitar a metodologia em outras placas.
 
-> **Estado atual:** fase de pesquisa e decisão de arquitetura. Este repositório
-> reúne a análise do modelo, o levantamento das alternativas de porte e uma
-> recomendação de pipeline. Ainda **não** há RTL gerado — os próximos passos
-> dependem de decisões descritas em [`docs/03-recomendacao-e-pipeline.md`](docs/03-recomendacao-e-pipeline.md).
+---
 
-## TL;DR das conclusões
+## 1. Conclusões
 
-1. **O modelo é grande para FPGA.** ~**6,43 milhões de parâmetros** e
-   ~**1,83 GMAC por inferência** (uma janela de ECG de ~10 s). Só os pesos, em
-   int8, ocupam ~6,4 MB — **muito acima** da memória interna de uma Arria V GX
-   (~1,7 MB de blocos M10K no A7). **Conclusão:** os pesos têm de ficar em
-   **DRAM externa (DDR3)** e ser carregados por streaming; uma arquitetura
-   "tudo desenrolado no chip" (como a usada em modelos minúsculos) é inviável
-   aqui. Ver [`docs/01-modelo-e-analise.md`](docs/01-modelo-e-analise.md).
+### 1.1 O modelo
+- **~6,43 M de parâmetros** e **~1,83 GMAC por inferência** (janela de ~10 s de
+  ECG). *Confirmado* rodando o Keras (`Total params: 6,425,638`) e pela análise
+  analítica em `analysis/`.
+- Topologia enxuta: 1 convolução de entrada + **4 blocos residuais** + 1 camada
+  densa. Só 5 tipos de operação: Conv1D (inclui 1×1), MaxPool1D, Add, ReLU e uma
+  Dense final com sigmoide.
 
-2. **OpenVINO está descartado** para a Arria V. O plugin FPGA do OpenVINO só
-   existiu para Arria 10 (PAC/Mustang) e foi *descontinuado* já em 2020; nunca
-   suportou a Arria V. Ver [`docs/02-alternativas-de-porte.md`](docs/02-alternativas-de-porte.md).
+### 1.2 A restrição que define o projeto
+- Os **pesos não cabem na memória interna** da Arria V (~1,7–2,1 MB de M10K)
+  contra 6,4 MB (int8) a 25,7 MB (fp32). → **DDR3 externa é obrigatória**, com um
+  acelerador **layer-by-layer** que reusa um único engine de Conv1D e faz
+  streaming dos pesos. A placa do projeto tem DDR3 de sobra: são necessários só
+  ~**16–20 MB** e a banda exigida (~1,3–90 MB/s) fica muito abaixo do disponível
+  (~1,6–4 GB/s). Ver [`docs/04-arria-v-recursos.md`](docs/04-arria-v-recursos.md).
+- **Latência folgada:** uma inferência a cada ~10 s é trivial → dá para usar
+  poucos DSPs e um projeto serializado. O gargalo é memória/banda, não cálculo.
 
-3. **OpenCL / oneAPI também não servem** como você suspeitava. O Intel FPGA SDK
-   for OpenCL foi descontinuado e não tem BSP para Arria V; o oneAPI só suporta
-   Arria 10 / Stratix 10 / Agilex e teve o suporte a FPGA *deprecado* a partir
-   de 2025.1.
+### 1.3 Precisão: **int16**
+Escolhida por ser a opção segura "de graça": como pesos, banda e DSP estão todos
+folgados, o custo do int16 sobre o int8 é irrelevante, enquanto o int16 preserva
+a acurácia (AUC/F1) com muito mais margem — o que importa num modelo clínico.
+int8 fica como otimização opcional futura. Justificativa em
+[`docs/03-recomendacao-e-pipeline.md`](docs/03-recomendacao-e-pipeline.md).
 
-4. **Porte manual "à mão"** de um modelo de 6,4 M de parâmetros é inviável — não
-   por causa do *número de camadas* (são poucas: 1 conv inicial + 4 blocos
-   residuais + 1 densa), mas pela quantidade de aritmética, memória e controle
-   de dataflow. Só valeria como referência de blocos isolados.
+### 1.4 Alternativas de porte — o que serve e o que não serve
+| Via | Serve para Arria V? | Motivo |
+|-----|:---:|--------|
+| **OpenVINO** | ❌ | plugin FPGA só existiu p/ Arria 10 e foi descontinuado (2020); entrega bitstream fechado, não Verilog |
+| **OpenCL (Intel FPGA SDK)** | ❌ | descontinuado; sem BSP para Arria V |
+| **oneAPI (DPC++ FPGA)** | ❌ | só Arria 10/Stratix 10/Agilex; suporte a FPGA deprecado em 2025.1 |
+| **Porte manual RTL** | ⚠️ | tecnicamente possível, mas escrever 6,4 M de params à mão é inviável — só p/ blocos-referência |
+| **hls4ml** | ⚠️ | funciona, mas **não emite RTL**: depende de back-end de HLS de fornecedor (Intel HLS/oneAPI) → contraria "ser geral" |
+| **NNgen** (ONNX→Verilog) | ✅ | emite RTL direto (sem HLS de fornecedor), já com DMA/DDR3 e quantização inteira |
+| **PandA/Bambu** (C→Verilog) | ✅ | HLS open-source e agnóstico de fornecedor |
 
-5. **O caminho recomendado é HLS** (modelo → C/C++/RTL → Verilog), em **duas vias
-   paralelas, ambas gerais e sem back-end de fornecedor** (decisão da rodada 1):
-   - **NNgen** (ONNX → Verilog + core AXI): gera RTL direto, já com DMA para DRAM
-     e quantização inteira — melhor ajuste à necessidade de memória externa;
-   - **PandA/Bambu** (C/C++ → Verilog): HLS open-source e agnóstico de fornecedor.
+Detalhes em [`docs/02-alternativas-de-porte.md`](docs/02-alternativas-de-porte.md).
 
-   **hls4ml** fica como comparação opcional: ele **não emite RTL** e depende de um
-   back-end de HLS de fornecedor (Intel HLS/oneAPI), contrariando o critério de
-   ser geral. A comparação completa está em
-   [`docs/02-alternativas-de-porte.md`](docs/02-alternativas-de-porte.md) e
-   [`docs/03-recomendacao-e-pipeline.md`](docs/03-recomendacao-e-pipeline.md).
+### 1.5 Caminho escolhido
+**Duas vias HLS paralelas, ambas gerais e sem back-end de fornecedor:**
+**NNgen** (ONNX → Verilog) e **PandA/Bambu** (C → Verilog). hls4ml fica como
+comparação opcional. Em ambas, dois pré-processamentos comuns: **fundir a
+BatchNorm** nas convoluções e **quantizar para int16**.
 
-## Estrutura do repositório
+### 1.6 O que já foi testado de verdade (neste ambiente)
+Executado com TensorFlow + NNgen (resultados completos em
+[`docs/05-testes-realizados.md`](docs/05-testes-realizados.md)):
+- ✅ Contagem de parâmetros confirmada (6.425.638, bate com a análise).
+- ✅ Fusão de BatchNorm: 13 pares Conv1D→BN fundidos.
+- ✅ Exportação para ONNX (25,7 MB fp32).
+- ✅ **NNgen importa todo o backbone convolucional** (Conv1D→conv2d, Add/skip,
+  MaxPool, BN, ReLU) — o maior risco técnico. Só a Dense(6) final (0,002% dos
+  MACs) precisa de higiene de grafo ou de rodar no host. **Fix documentado.**
+- ✅ Engine C do Bambu compila limpo (`gcc -Wall -Wextra`).
+
+---
+
+## 2. Como testar / reproduzir
+
+### 2.1 Só a análise de complexidade (sem dependências pesadas)
+```bash
+python3 analysis/model_complexity.py     # imprime params/MACs por camada
+```
+
+### 2.2 Frente de software completa (build → fold BN → ONNX)
+Requer o ambiente de `scripts/requirements.txt`. Recomenda-se um venv (pyverilog
+exige `setuptools<58` no Python 3.11):
+```bash
+python3 -m venv env && . env/bin/activate
+pip install "setuptools<58" wheel
+pip install -r scripts/requirements.txt
+sudo apt-get install -y iverilog        # p/ simular o RTL depois
+
+# 0) baseline + golden reference (com pesos reais do Zenodo, ou sem p/ smoke test)
+python3 scripts/00_baseline.py --weights model.hdf5
+
+# 1) fusao de BatchNorm nas convolucoes
+python3 scripts/01_fold_bn.py --weights model.hdf5
+
+# 2) exporta ONNX (entrada do NNgen) + dump de pesos
+python3 scripts/02_export_onnx.py --weights model.hdf5
+```
+> Os pesos treinados (`model.hdf5`) vêm do
+> [Zenodo doi:10.5281/zenodo.3625017](https://doi.org/10.5281/zenodo.3625017).
+> Sem `--weights`, os scripts rodam com init aleatório (validam o pipeline, não a
+> acurácia).
+
+---
+
+## 3. Como fazer a conversão (modelo → Verilog)
+
+### 3.1 Via A — NNgen (ONNX → Verilog RTL + AXI/DMA)
+```bash
+python3 scripts/03a_nngen_convert.py --onnx outputs/ecg_model.onnx --bitwidth 16
+```
+Gera o Verilog do acelerador (PEs + memória on-chip + DMA + AXI4), que sintetiza
+no Quartus para a Arria V. **Sem** HLS de fornecedor.
+
+**Ajuste conhecido (já diagnosticado):** a Dense(6) final precisa entrar como
+`Flatten`+`Gemm` com peso constante — ou, mais simples, rodar essa camada
+minúscula no host e deixar o NNgen acelerar todo o backbone convolucional. Ver
+[`docs/05-testes-realizados.md`](docs/05-testes-realizados.md) §4.
+
+### 3.2 Via B — PandA/Bambu (C → Verilog)
+```bash
+bambu scripts/bambu/conv1d_engine.c --top-fname=conv1d_layer \
+      --device-name=<parte_arria_v> --clock-period=10 \
+      --generate-tb=tb.xml --simulate -v3
+```
+`conv1d_engine.c` é o engine de Conv1D reutilizável (int16, BN fundida) que cobre
+todas as camadas iterando camada a camada. Detalhes em
+[`scripts/bambu/README.md`](scripts/bambu/README.md).
+
+### 3.3 Validação
+Ambas as vias geram *testbench*; simule com Icarus Verilog e compare a saída
+contra `outputs/golden_output.npy` (a referência fp32 do baseline). O critério é
+casar dentro da tolerância de quantização int16.
+
+---
+
+## 4. Como implementar na Arria V
+
+1. **Pré-processar o modelo** (§2 e §3): fold BN + quantização int16 + geração do
+   RTL (NNgen ou Bambu) + blob de pesos para a DDR3.
+2. **Montar o projeto no Quartus Prime (Standard)** para a **parte exata** da sua
+   Arria V. Integrar:
+   - o acelerador (RTL gerado);
+   - o **controlador DDR3** (hard memory controller da Arria V) para os pesos;
+   - o caminho de I/O do ECG (host via AXI/PCIe, UART, ou memória pré-carregada);
+   - o *wrapper* de topo que sequencia as camadas.
+3. **Fechar timing** a ~100 MHz (folgado, dada a latência-alvo) e fazer
+   *place & route*.
+4. **Validar em hardware** contra o golden reference; medir latência e uso de
+   recursos (LUT/DSP/M10K/banda DDR3).
+5. **Otimizar** o paralelismo do engine (nº de DSPs) e o *tiling* ao orçamento.
+
+Plano por etapas com marcos verificáveis em
+[`docs/03-recomendacao-e-pipeline.md`](docs/03-recomendacao-e-pipeline.md).
+
+> **Posso rodar isso por você?** A **frente de software** (§2 e a maior parte do
+> §3 — build, fold, ONNX, import no NNgen, compilação do C) eu executo numa
+> sessão como esta, e já executei (ver [`docs/05`](docs/05-testes-realizados.md)).
+> O que **não** dá para fazer aqui é a **síntese no Quartus e a execução na
+> placa** (§4 passos 2–4): exigem o toolchain Intel licenciado e o **hardware
+> Arria V físico**, que este ambiente não tem. Para essas etapas eu gero e valido
+> os artefatos (RTL, testbench, scripts de projeto); você roda no Quartus/placa.
+
+---
+
+## 5. Estrutura do repositório
 
 ```
 .
-├── README.md                        # este arquivo
-├── docs/
-│   ├── 01-modelo-e-analise.md       # arquitetura, contagem de params/MACs, viabilidade
-│   ├── 02-alternativas-de-porte.md  # OpenVINO, OpenCL/oneAPI, manual, HLS (hls4ml/Bambu/NNgen)
-│   ├── 03-recomendacao-e-pipeline.md# pipeline recomendado, plano por etapas, decisões abertas
-│   ├── 04-arria-v-recursos.md       # recursos da Arria V e orçamento de hardware
-│   └── referencias.md               # todas as fontes consultadas
+├── README.md
 ├── analysis/
-│   ├── model_complexity.py          # calcula params/MACs por camada (não precisa de TensorFlow)
-│   └── model_complexity.txt         # saída congelada do script
+│   ├── model_complexity.py      # params/MACs por camada (sem TensorFlow)
+│   └── model_complexity.txt
+├── docs/
+│   ├── 01-modelo-e-analise.md   # arquitetura, complexidade, viabilidade
+│   ├── 02-alternativas-de-porte.md
+│   ├── 03-recomendacao-e-pipeline.md
+│   ├── 04-arria-v-recursos.md   # recursos da Arria V + estimativa de DDR3
+│   ├── 05-testes-realizados.md  # o que já foi executado e validado
+│   └── referencias.md
+├── scripts/
+│   ├── requirements.txt
+│   ├── 00_baseline.py           # build + golden reference
+│   ├── 01_fold_bn.py            # fusao de BatchNorm
+│   ├── 02_export_onnx.py        # export ONNX + dump de pesos
+│   ├── 03a_nngen_convert.py     # Via A: ONNX -> Verilog (NNgen)
+│   └── bambu/                   # Via B: C -> Verilog (Bambu)
+│       ├── conv1d_engine.c
+│       └── README.md
 └── reference/
-    └── model.py                     # cópia do model.py original (Ribeiro et al.) p/ referência
+    └── model.py                 # copia do model.py original (Ribeiro et al.)
 ```
 
-## Como reproduzir a análise de complexidade
+## 6. Pontos ainda abertos (não bloqueantes)
+- **Parte/kit exato da Arria V** e quanto de DDR3 o board tem — para fechar
+  *place & route* e timing.
+- **Interface de I/O** do ECG (host/AXI/UART/memória) — define o *wrapper* de topo.
 
-```bash
-python3 analysis/model_complexity.py
-```
-
-Não requer TensorFlow — as formas das camadas são derivadas analiticamente a
-partir da definição em `reference/model.py`.
-
-## Decisões que dependem de você
-
-Estão consolidadas no fim de
-[`docs/03-recomendacao-e-pipeline.md`](docs/03-recomendacao-e-pipeline.md).
-**Rodada 1 já decidida:** modelo **completo** (6 saídas, 4096×12); precisão
-**int16**; duas vias **gerais** de porte (**NNgen + Bambu**); DDR3 externa (a
-Arria V do projeto tem de sobra — estimativa em §4.4). Restam abertas, sem
-bloquear o início: a **parte/kit exato** da Arria V e a **interface de I/O**.
+Nenhum dos dois impede avançar nas Etapas 0–2 (software + protótipos em simulação).

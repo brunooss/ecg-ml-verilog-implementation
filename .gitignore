@@ -1,0 +1,18 @@
+# artefatos gerados (pesos, ONNX, RTL) - nao versionar
+outputs/
+*.hdf5
+*.onnx
+*.npz
+*.npy
+!analysis/*.txt
+
+# ambientes / caches Python
+env/
+venv/
+__pycache__/
+*.pyc
+
+# RTL / build de HLS
+*.o
+scripts/bambu/*_tb*
+scripts/**/HLS_output/
