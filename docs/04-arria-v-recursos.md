@@ -47,7 +47,43 @@ engine, e escrever a saída de volta em M10K (ou DDR3 se necessário).
 - Ou seja: dá para usar **poucos DSPs**, priorizar simplicidade/área e ainda
   sobrar folga enorme. O projeto pode ser **serial e pequeno**.
 
-## 4.4 Implicações de arquitetura
+## 4.4 Estimativa de uso da DDR3 (precisão escolhida: int16)
+
+Com a decisão de usar **int16** (ver [`03-recomendacao-e-pipeline.md`](03-recomendacao-e-pipeline.md#justificativa-da-precisão-int16)),
+segue o dimensionamento do que precisa morar na DDR3 e da banda exigida.
+
+### Capacidade
+
+| O que | Tamanho @ int16 | Observação |
+|-------|----------------:|------------|
+| **Pesos do modelo** | **~12,85 MB** | 6,43 M params × 2 B; principal ocupante |
+| Bias por canal (BN fundida) | ~5 KB | ~2,4 k canais somados × 2 B |
+| Buffer de entrada (1 ECG) | ~98 KB | 4096×12 × 2 B |
+| *Spill* de ativações (se necessário) | ~0,5–2 MB | maior mapa 4096×64 = 512 KB; margem p/ *double buffer* |
+| **Total prático** | **~16–20 MB** (com alinhamento/folga) | |
+
+**Conclusão:** ~**16–20 MB** bastam. Qualquer DDR3 de board Arria V (tipicamente
+256 MB a 1 GB) é **enorme** para essa necessidade — confirma seu "sobrando". Não
+há restrição de capacidade.
+
+### Banda
+
+Num esquema layer-by-layer, cada peso é lido da DDR3 **uma vez por inferência**
+(as ativações da camada ficam on-chip). Logo o tráfego dominante é ~12,85 MB de
+pesos por inferência.
+
+| Cenário | Banda exigida |
+|---------|--------------:|
+| 1 inferência a cada 10 s (janela de ECG) | **~1,3 MB/s** |
+| 1 inferência a cada ~140 ms (compute-bound, ~128 MACs @100 MHz) | **~90 MB/s** |
+
+Uma DDR3 modesta na Arria V (ex.: interface de 16–32 bits a DDR3-800/1066)
+entrega **~1,6–4 GB/s**. Ou seja, a banda exigida fica **~20× a ~3000× abaixo**
+do disponível — **banda não é gargalo** em nenhum cenário realista. Isso permite
+um controlador DDR3 simples com acesso essencialmente sequencial (*burst*
+amigável, pré-busca do próximo *tile* de pesos durante o cálculo do atual).
+
+## 4.5 Implicações de arquitetura
 
 1. **Um engine de Conv1D reutilizável**, iterando camada a camada (não um bloco
    por camada). Custo de hardware independente do nº de camadas.

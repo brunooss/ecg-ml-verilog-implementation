@@ -15,7 +15,7 @@ Concretamente, dois caminhos paralelos que podem ser prototipados e comparados:
    Keras (.hdf5)         │  PRÉ-PROCESSAMENTO (comum às duas vias)      │
    Ribeiro et al.  ─────▶│  1. fold BatchNorm → Conv (w', bias)         │
                          │  2. remover Dropout (no-op em inferência)    │
-                         │  3. quantizar int8/int16 (PTQ) + validar AUC │
+                         │  3. quantizar int16 (PTQ) + validar AUC/F1   │
                          │  4. exportar pesos + (ONNX ou C headers)     │
                          └───────────────┬──────────────┬──────────────┘
                                          │              │
@@ -40,9 +40,10 @@ um acelerador funcional porque já resolve DMA+quantização; a Via B (Bambu) é
 plano de contingência totalmente aberto, sem amarras, útil se o mapeamento
 Conv1D/skip no NNgen esbarrar em limitações de operadores.
 
-> **hls4ml** fica como terceira via / comparação: útil se você quiser reaproveitar
-> as camadas prontas da ferramenta, mas exige forçar `io_stream` + subgrafos e
-> adaptar o armazenamento de pesos — mais atrito para este tamanho de modelo.
+> **hls4ml** fica como **comparação opcional**: além de exigir `io_stream` +
+> subgrafos e adaptar o armazenamento de pesos, ele **depende de um back-end de
+> HLS de fornecedor** (não emite RTL) — o que contraria o critério de ser geral
+> e sem back-end próprio. Só entra se você pedir explicitamente. Ver §3.5.
 
 ## 3.2 Plano por etapas (marcos verificáveis)
 
@@ -54,9 +55,9 @@ Conv1D/skip no NNgen esbarrar em limitações de operadores.
 ### Etapa 1 — Preparação do modelo para hardware
 - [ ] Implementar a **fusão BatchNorm→Conv** e remover Dropout; verificar que a
       saída não muda (fp32).
-- [ ] **Quantização pós-treino** (int8 e int16); medir queda de **AUC/F1** no
-      conjunto de teste do repositório. Definir a menor precisão aceitável.
-- [ ] Exportar o modelo quantizado em **ONNX** (para NNgen) e/ou pesos crus +
+- [ ] **Quantização pós-treino em int16** (decidido); medir queda de **AUC/F1**
+      no conjunto de teste do repositório e confirmar que é aceitável.
+- [ ] Exportar o modelo quantizado em **ONNX** (para NNgen) e pesos crus +
       *header* C (para Bambu).
 
 ### Etapa 2 — Protótipo de acelerador (as duas vias)
@@ -100,21 +101,54 @@ Ver números completos em [`04-arria-v-recursos.md`](04-arria-v-recursos.md). Em
 | Controlador DDR3 e banda | latência folgada permite acesso serializado simples |
 | Parte exata da Arria V desconhecida | confirmar com você (ver decisões abaixo) |
 
-## 3.5 Decisões que dependem de você (para a próxima rodada)
+## 3.5 Decisões já tomadas (rodada 1)
 
-Preciso destas definições para afinar o plano e começar a Etapa 0/1:
+| # | Decisão | Resposta | Consequência de projeto |
+|---|---------|----------|-------------------------|
+| 1 | Modelo-alvo | **Modelo completo** (6 saídas, entrada 4096×12, ~6,43 M params) | Sem poda; dataflow layer-by-layer + DDR3 obrigatórios |
+| 2 | Placa / DDR3 | **Arria V com DDR3 externa** (capacidade a confirmar, "sobrando") | Pesos e I/O na DDR3; ver estimativa em [`04-arria-v-recursos.md`](04-arria-v-recursos.md) (§4.4) |
+| 3 | Precisão | **int16** (decidido — ver justificativa abaixo) | Pesos ~12,85 MB na DDR3; acumulador int32/int48; menor risco de acurácia |
+| 4 | Toolchain | **Duas vias, ambas gerais e sem back-end de fornecedor: NNgen + Bambu** | hls4ml rebaixado a comparação opcional (depende de back-end de fornecedor) |
 
-1. **Modelo-alvo:** portamos o modelo original completo (6 saídas, entrada
-   4096×12), ou há intenção de **podar/reduzir** (menos canais, menos derivações,
-   janela menor) para caber com folga? A poda reduz muito o custo de hardware.
-2. **Placa exata:** qual **parte** da Arria V (ex.: `5AGXMA…`, GX/SX, A7/B3…) e
-   qual **kit/board**? Isso fixa memória, DSPs e a existência de DDR3 no board.
-3. **Precisão aceitável:** qual queda de AUC/F1 é tolerável na sua pesquisa?
-   (define int8 vs int16 vs manter fp32 em partes sensíveis).
-4. **Toolchain preferido:** priorizamos a via **open-source/portável**
-   (NNgen/Bambu) — coerente com o objetivo de generalidade — ou você quer que eu
-   também prototipe a via **hls4ml/Intel HLS** para comparação?
-5. **Interface de I/O:** como o ECG entra e o resultado sai na sua montagem
-   (host via PCIe/AXI, UART, memória pré-carregada)? Define o *wrapper* de topo.
+### Justificativa da precisão (int16)
 
-Com as respostas (principalmente 1, 2 e 4) eu avanço para a Etapa 0/1 com código.
+int16 é a escolha certa aqui, e por um motivo que dispensa trade-off:
+
+- **O custo de área/memória do int16 sobre o int8 é pequeno neste caso.** Os
+  pesos vão para a DDR3 de qualquer forma (nem int8 cabe on-chip), e há DDR3
+  "sobrando" — então dobrar 6,4 MB → 12,85 MB é irrelevante para a capacidade e
+  para a banda (ver §4.5: a banda exigida é da ordem de dezenas de MB/s, ~100×
+  abaixo do que uma DDR3 entrega).
+- **Não há pressão de latência** (uma inferência a cada ~10 s), então o eventual
+  uso de 2 DSPs por MAC em vez de empacotar 2–3 MACs int8 por DSP também é
+  irrelevante — sobram DSPs de sobra.
+- **Em troca, int16 preserva a acurácia** (AUC/F1) com margem muito maior que
+  int8, reduzindo o risco de a quantização degradar o diagnóstico — que é o
+  ponto sensível de um modelo clínico.
+
+Ou seja: como memória, banda e DSP estão todos folgados, **paga-se quase nada
+por escolher a precisão mais segura**. Mantemos int8 apenas como *otimização
+opcional* futura, se algum dia houver pressão de área.
+
+### Por que NNgen + Bambu (e não hls4ml) para atender "sem back-end próprio"
+
+- **NNgen** gera **Verilog RTL diretamente** (via Veriloggen) — não usa nenhum
+  HLS de fornecedor. O RTL + core AXI sintetiza no Quartus para a Arria V.
+- **Bambu (PandA)** é HLS **open-source e agnóstico de fornecedor**: C/C++ →
+  Verilog genérico, que também sintetiza no Quartus para a Arria V.
+- **hls4ml NÃO emite RTL** — emite C++ de HLS que exige um back-end de fornecedor
+  (no caminho Intel, o Intel HLS, que só cobre a Arria V até a 19.1). Portanto
+  ele **tem, por natureza, um back-end de fornecedor** — contrário ao critério
+  "geral". Fica como comparação opcional apenas se você quiser.
+
+## 3.6 Decisões ainda em aberto (não bloqueantes)
+
+Não travam o início do trabalho, mas vou precisar delas mais à frente:
+
+1. **Parte/kit exato da Arria V** (ex.: `5AGX…`, GX/SX, A7/B3) e **quanto de
+   DDR3** o board tem — para fechar *place & route* e *timing* na Etapa 3.
+2. **Interface de I/O**: como o ECG entra e o resultado sai (host via PCIe/AXI,
+   UART, memória pré-carregada) — define o *wrapper* de topo na Etapa 3.
+
+Nada disso impede começar as Etapas 0–2 (baseline de software, fusão de BN,
+quantização int16 e os dois protótipos de acelerador em simulação).

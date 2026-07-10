@@ -39,15 +39,15 @@ possível, para que a mesma metodologia possa ser reaproveitada em outras placas
    residuais + 1 densa), mas pela quantidade de aritmética, memória e controle
    de dataflow. Só valeria como referência de blocos isolados.
 
-5. **O caminho recomendado é HLS** (modelo → C/C++ → Verilog), em uma de duas
-   variantes:
-   - **hls4ml** (Keras → HLS → RTL), com o *backend* Intel/Quartus HLS ou oneAPI;
-   - **HLS genérico + open-source** (ex.: **PandA/Bambu**, C/C++ → Verilog),
-     alimentado por um gerador de código de NN;
-   - **NNgen** (ONNX → Verilog + core AXI) como alternativa que já entrega um
-     acelerador com DMA para DRAM, mais alinhado à necessidade de memória externa.
+5. **O caminho recomendado é HLS** (modelo → C/C++/RTL → Verilog), em **duas vias
+   paralelas, ambas gerais e sem back-end de fornecedor** (decisão da rodada 1):
+   - **NNgen** (ONNX → Verilog + core AXI): gera RTL direto, já com DMA para DRAM
+     e quantização inteira — melhor ajuste à necessidade de memória externa;
+   - **PandA/Bambu** (C/C++ → Verilog): HLS open-source e agnóstico de fornecedor.
 
-   A comparação completa e a recomendação estão em
+   **hls4ml** fica como comparação opcional: ele **não emite RTL** e depende de um
+   back-end de HLS de fornecedor (Intel HLS/oneAPI), contrariando o critério de
+   ser geral. A comparação completa está em
    [`docs/02-alternativas-de-porte.md`](docs/02-alternativas-de-porte.md) e
    [`docs/03-recomendacao-e-pipeline.md`](docs/03-recomendacao-e-pipeline.md).
 
@@ -82,8 +82,7 @@ partir da definição em `reference/model.py`.
 
 Estão consolidadas no fim de
 [`docs/03-recomendacao-e-pipeline.md`](docs/03-recomendacao-e-pipeline.md).
-As principais: (a) o modelo-alvo é o de 6 saídas de 4096×12, ou uma versão
-podada/reduzida? (b) qual variante exata da Arria V (parte e kit)? (c) latência
-alvo aceitável (uma inferência a cada ~10 s é folgado)? (d) preferimos o toolchain
-Intel (Quartus HLS/oneAPI, mais integrado mas semi-descontinuado) ou uma via
-totalmente open-source (Bambu/NNgen, mais portável)?
+**Rodada 1 já decidida:** modelo **completo** (6 saídas, 4096×12); precisão
+**int16**; duas vias **gerais** de porte (**NNgen + Bambu**); DDR3 externa (a
+Arria V do projeto tem de sobra — estimativa em §4.4). Restam abertas, sem
+bloquear o início: a **parte/kit exato** da Arria V e a **interface de I/O**.

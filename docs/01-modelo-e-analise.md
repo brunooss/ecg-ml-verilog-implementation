@@ -110,11 +110,13 @@ de porte:
    throughput**, o que permite uma arquitetura pequena e serializada, reusando
    um núcleo de convolução para todas as camadas.
 
-3. **Quantização é praticamente obrigatória.** fp32 é caro em DSP e memória.
-   int8/int16 (com *post-training quantization*) reduz pesos para 6,4/12,8 MB e
-   permite empacotar 2–4 MACs por bloco DSP variable-precision da Arria V. Será
-   preciso validar a **perda de acurácia (AUC/F1)** após quantização — passo de
-   pesquisa a fazer com os dados de teste do repositório original.
+3. **Quantização é praticamente obrigatória — precisão escolhida: int16.** fp32 é
+   caro em DSP e memória. Com *post-training quantization* em **int16** os pesos
+   ficam em ~12,85 MB (na DDR3) preservando a acurácia com boa margem; int8
+   (~6,4 MB) fica como otimização opcional futura. A escolha do int16 é
+   justificada em [`03-recomendacao-e-pipeline.md`](03-recomendacao-e-pipeline.md#justificativa-da-precisão-int16).
+   Ainda assim, é preciso validar a **perda de acurácia (AUC/F1)** após a
+   quantização com os dados de teste do repositório original.
 
 4. **A topologia é amigável a um acelerador genérico de CNN 1D.** Só há 5 tipos
    de operação: Conv1D (incl. 1×1), MaxPool1D, Add, ReLU e uma Dense final. Um
