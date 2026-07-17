@@ -18,3 +18,9 @@ scripts/bambu/*_tb*
 scripts/**/HLS_output/
 # versiona o excerto de interface em rtl/, mas nao o .v completo (2.8 MB) em outputs/
 !rtl/*.v
+
+# simulacao (artefatos gerados por scripts/04_make_sim_data.py e make)
+sim/build/
+sim/data/
+sim/output.hex
+*.vcd

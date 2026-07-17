@@ -80,6 +80,14 @@ Executado com TensorFlow + NNgen (resultados completos em
   [`docs/05`](docs/05-testes-realizados.md) §4–6.
 - ✅ Engine C do Bambu compila limpo (`gcc -Wall -Wextra`) — via **sem** nenhuma
   dessas fricções de ONNX.
+- ✅ **Simulação funcional com RAM (DDR3 simulada): PASS.** O acelerador gerado
+  pelo NNgen foi simulado de ponta a ponta no Icarus Verilog: um modelo de RAM
+  AXI4 ([`rtl/sim/axi_ram_model.v`](rtl/sim/axi_ram_model.v)) faz o papel da
+  DDR3 (sinal + pesos pré-carregados via `$readmemh`), o testbench
+  ([`rtl/sim/tb_ecg_conv_layer.v`](rtl/sim/tb_ecg_conv_layer.v)) programa o
+  acelerador via AXI4-Lite e a **saída bate palavra a palavra (match exato)**
+  com o golden calculado em NumPy (`ng.eval`). Ver §2.3 e
+  [`docs/05`](docs/05-testes-realizados.md) §7.
 
 ---
 
@@ -112,6 +120,27 @@ python3 scripts/02_export_onnx.py --weights model.hdf5
 > [Zenodo doi:10.5281/zenodo.3625017](https://doi.org/10.5281/zenodo.3625017).
 > Sem `--weights`, os scripts rodam com init aleatório (validam o pipeline, não a
 > acurácia).
+
+### 2.3 Simulação do acelerador com RAM AXI4 (DDR3 simulada)
+Não precisa do TensorFlow — só `nngen`, `numpy<1.24` e `iverilog`:
+```bash
+pip install "setuptools<58" && pip install "numpy<1.24" nngen==1.3.4
+sudo apt-get install -y iverilog
+
+cd sim
+make check                                  # gera dados+RTL, simula e verifica
+make check DIMS="--H 128 --Cin 16 --Cout 16"   # instância maior
+make wave                                   # idem, com dump VCD
+```
+O fluxo: `scripts/04_make_sim_data.py` monta o grafo (mesmo operador do
+`03b`), gera o RTL da instância de teste, a **imagem da RAM** (`ram_init.hex`,
+com sinal + pesos + bias nos endereços que o próprio NNgen aloca) e o **golden**
+(`ng.eval`). O testbench emula o host: habilita interrupção, escreve no
+registrador `START` via AXI4-Lite, espera o `irq`, e compara a região de saída
+da RAM com o golden — o critério é **match exato** (int16, sem tolerância).
+Por padrão usa dimensões reduzidas (H=64, 8→8 canais, kernel 16×1) para a
+simulação terminar em segundos; a instância com as dimensões reais da camada
+(4096, 64→128) é a mesma geração com `DIMS`, mas leva horas no iverilog.
 
 ---
 
@@ -195,13 +224,20 @@ Plano por etapas com marcos verificáveis em
 │   ├── 06-explicacao-para-leigos.md  # o projeto inteiro em linguagem simples
 │   └── referencias.md
 ├── rtl/
-│   └── ecg_conv_layer_interface.v    # excerto do Verilog gerado (NNgen)
+│   ├── ecg_conv_layer_interface.v    # excerto do Verilog gerado (NNgen)
+│   └── sim/
+│       ├── axi_ram_model.v      # RAM AXI4 (DDR3 simulada, $readmemh)
+│       └── tb_ecg_conv_layer.v  # testbench: host AXI-Lite + verificacao
+├── sim/
+│   └── Makefile                 # make check -> gera, simula e verifica
 ├── scripts/
 │   ├── requirements.txt
 │   ├── 00_baseline.py           # build + golden reference
 │   ├── 01_fold_bn.py            # fusao de BatchNorm
 │   ├── 02_export_onnx.py        # export ONNX + dump de pesos
 │   ├── 03a_nngen_convert.py     # Via A: ONNX -> Verilog (NNgen)
+│   ├── 03b_nngen_native_layer.py # Via A: RTL de 1 camada (API nativa)
+│   ├── 04_make_sim_data.py      # imagem da RAM + golden p/ simulacao
 │   └── bambu/                   # Via B: C -> Verilog (Bambu)
 │       ├── conv1d_engine.c
 │       └── README.md
@@ -214,12 +250,16 @@ Plano por etapas com marcos verificáveis em
 **Próximos passos técnicos (executáveis em software, sem hardware):**
 1. **NNgen:** encadear as ~15 convoluções pela **API nativa** (já provada gerando
    RTL de uma camada — ver [`docs/05`](docs/05-testes-realizados.md) §6 e
-   [`rtl/`](rtl/)), somar os *skips* e emitir o Verilog do backbone completo;
-   depois simular contra o *golden reference*. Trabalho mecânico, sem incógnitas
-   de viabilidade.
-2. **Acurácia:** baixar os pesos treinados (Zenodo) + o CODE-test e medir a
+   [`rtl/`](rtl/)), somar os *skips* e emitir o Verilog do backbone completo.
+   A infraestrutura de simulação (RAM AXI4 + testbench + golden, §2.3) já está
+   pronta e **passando com match exato** para uma camada — para o backbone é
+   reusar o mesmo harness com a nova imagem de memória.
+2. **Pesos reais na simulação:** trocar os valores aleatórios do
+   `04_make_sim_data.py` pelos pesos int16 do `weights.npz` (fold BN feito) e
+   uma janela real de ECG — mesma mecânica, valida a quantização de verdade.
+3. **Acurácia:** baixar os pesos treinados (Zenodo) + o CODE-test e medir a
    **queda de AUC/F1 com int16** — a validação mais importante para a pesquisa.
-3. **Bambu:** empacotar `weights.npz` em int16 + tabela de camadas e sintetizar
+4. **Bambu:** empacotar `weights.npz` em int16 + tabela de camadas e sintetizar
    o `conv1d_engine.c` (precisa do PandA/Bambu instalado).
 
 **Pontos abertos (dependem de você, não bloqueiam o software):**

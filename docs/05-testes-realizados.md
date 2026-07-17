@@ -139,6 +139,49 @@ para o backbone completo é **encadear as ~15 convoluções pela API nativa** (c
 uma com suas dimensões/stride) e somar os *skips* — trabalho mecânico, sem mais
 incógnitas de viabilidade.
 
+## ✅ 7. Simulação funcional com RAM AXI4 (DDR3 simulada) — PASS
+
+O RTL gerado pelo NNgen saiu do "parse OK" para **execução funcional verificada**
+no Icarus Verilog. Como o acelerador não recebe amostras por streaming direto —
+ele **lê sinal e pesos de uma DRAM via AXI4 master (128 bits)** e é controlado
+por registradores AXI4-Lite — a simulação exige emular a DDR3 e o host:
+
+- [`../rtl/sim/axi_ram_model.v`](../rtl/sim/axi_ram_model.v) — RAM com interface
+  AXI4 slave (bursts INCR, `wstrb`), pré-carregada via `$readmemh` com a imagem
+  gerada em Python. É a "DDR3 simulada" de onde o acelerador **streama** os dados.
+- [`../rtl/sim/tb_ecg_conv_layer.v`](../rtl/sim/tb_ecg_conv_layer.v) — o "host":
+  habilita interrupção (IER), escreve 1 no registrador `START` (offset 0x10 do
+  AXI4-Lite), espera o `irq`, reconhece (ISR/IAR) e compara a região de saída da
+  RAM com o golden.
+- `scripts/04_make_sim_data.py` — monta o mesmo grafo do `03b`, gera o RTL da
+  instância de teste, o golden em software (**`ng.eval`**, mesma semântica do
+  RTL) e a imagem da RAM (`ram_init.hex`) usando os endereços DRAM que o próprio
+  NNgen aloca (`x.addr`, `w.addr`, `y.addr`) e o blob de pesos de
+  `ng.export_ndarray` — RTL e memória sempre coerentes por construção.
+- `sim/Makefile` — `make check` faz tudo (gerar → compilar → simular → verificar).
+
+Resultados (seed fixa, valores dimensionados para não saturar int16 → critério
+de **match exato**, sem tolerância):
+
+| Instância (mesmo operador: conv k×1, SAME, bias, ReLU, int16) | Ciclos | Resultado |
+|---|---|---|
+| H=64, 8→8, kernel 16×1 (padrão) | ~4.950 | **PASS — 512/512 palavras exatas** |
+| H=128, 16→16, kernel 16×1 | ~34.000 | **PASS — 2.048/2.048 palavras exatas** |
+
+```
+[tb] fim da execucao: irq=1 busy=0 (49.5 us, ~4950 ciclos)
+[tb] 512 palavras conferidas contra o golden.
+RESULT: PASS
+```
+
+Isso valida, executando: o **DMA AXI4** do acelerador (leitura de sinal+pesos,
+escrita do resultado), o **controle via AXI4-Lite + irq**, e a **matemática
+int16** do datapath (conv + bias + ReLU) contra a referência NumPy. A instância
+com dimensões reais da camada (H=4096, 64→128) usa o mesmo fluxo
+(`make check DIMS="--H 4096 --Cin 64 --Cout 128"`), mas levaria horas de CPU no
+iverilog (~500× mais MACs) — fica para um simulador compilado (Verilator) ou
+para a validação por partes.
+
 ## ✅ 5. Engine C para Bambu — COMPILA LIMPO
 
 `scripts/bambu/conv1d_engine.c` (engine Conv1D reutilizável int16 + maxpool +
@@ -156,7 +199,8 @@ depende do PandA/Bambu instalado e da parte exata da Arria V (Etapa 2/3).
 | Item | Por que não aqui | Onde fazer |
 |------|------------------|------------|
 | Acurácia com pesos reais + int16 | precisa baixar pesos do Zenodo e dataset de teste | Etapa 1, ambiente do projeto |
-| Geração de RTL no NNgen | precisa do modelo em Conv2D (H×1) ou API nativa (item 4) | Etapa 2 |
+| Simulação da camada em dimensões reais (4096, 64→128) | mesmo fluxo do item 7, mas ~500× mais MACs → horas no iverilog | Verilator, ou validação por partes |
+| Simulação com pesos reais (`weights.npz`) | depende dos pesos do Zenodo; a mecânica já está pronta no `04_make_sim_data.py` | Etapa 2 |
 | Síntese Bambu → Verilog | PandA/Bambu não instalado no contêiner | Etapa 2 |
 | *Place & route* / timing no Quartus | precisa do Quartus Prime + parte exata da Arria V | Etapa 3 |
 | Execução na placa | precisa do hardware Arria V + DDR3 | Etapa 3 |
